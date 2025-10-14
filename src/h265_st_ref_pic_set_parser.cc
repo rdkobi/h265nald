@@ -54,12 +54,12 @@ void H265StRefPicSetParser::StRefPicSetState::DeriveValues(
 
   int32_t d_poc = 0;
   for (uint32_t i = 0; i < ref->num_negative_pics; i++) {
-    d_poc -= ref->delta_poc_s0_minus1[i] + 1;
+    d_poc -= static_cast<int32_t>(ref->delta_poc_s0_minus1[i]) + 1;
     ref_delta_poc_s0[i] = d_poc;
   }
   d_poc = 0;
   for (uint32_t i = 0; i < ref->num_positive_pics; i++) {
-    d_poc += ref->delta_poc_s1_minus1[i] + 1;
+    d_poc += static_cast<int32_t>(ref->delta_poc_s1_minus1[i]) + 1;
     ref_delta_poc_s1[i] = d_poc;
   }
 
