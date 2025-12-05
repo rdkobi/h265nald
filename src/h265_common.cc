@@ -568,58 +568,82 @@ size_t get_current_offset(BitBuffer *bit_buffer) {
   return out_byte_offset + ((out_bit_offset == 0) ? 0 : 1);
 }
 
-bool more_rbsp_data(BitBuffer *bit_buffer) {
-  // > If there is no more data in the raw byte sequence payload (RBSP), the
-  // > return value of more_rbsp_data() is equal to FALSE.
-  uint64_t remaining_bitcount = bit_buffer->RemainingBitCount();
-  if (remaining_bitcount == 0) {
-    return false;
-  }
+bool more_rbsp_data(BitBuffer* bit_buffer) {
+    // > If there is no more data in the raw byte sequence payload (RBSP), the
+    // > return value of more_rbsp_data() is equal to FALSE.
+    uint64_t remaining_bitcount = bit_buffer->RemainingBitCount();
+    if (remaining_bitcount == 0) {
+        return false;
+    }
 
-  // > Otherwise, the RBSP data is searched for the last (least significant,
-  // > right-most) bit equal to 1 that is present in the RBSP. Given the
-  // > position of this bit, which is the first bit (rbsp_stop_one_bit) of
-  // > the rbsp_trailing_bits() syntax structure, the following applies:
-  // > - If there is more data in an RBSP before the rbsp_trailing_bits()
-  // >   syntax structure, the return value of more_rbsp_data() is equal to
-  // >   TRUE.
-  // > - Otherwise, the return value of more_rbsp_data() is equal to FALSE.
-  // > The method for enabling determination of whether there is more data
-  // > in the RBSP is specified by the application (or in Annex B for
-  // > applications that use the byte stream format).
+    // > Otherwise, the RBSP data is searched for the last (least significant,
+    // > right-most) bit equal to 1 that is present in the RBSP. Given the
+    // > position of this bit, which is the first bit (rbsp_stop_one_bit) of
+    // > the rbsp_trailing_bits() syntax structure, the following applies:
+    // > - If there is more data in an RBSP before the rbsp_trailing_bits()
+    // >   syntax structure, the return value of more_rbsp_data() is equal to
+    // >   TRUE.
+    // > - Otherwise, the return value of more_rbsp_data() is equal to FALSE.
+    // > The method for enabling determination of whether there is more data
+    // > in the RBSP is specified by the application (or in Annex B for
+    // > applications that use the byte stream format).
+    //
+    // Here we do the following simplification:
+    // (1) We know that rbsp_trailing_bits() itself is limited to at most 1
+    // byte. Its definition is:
+    // > rbsp_trailing_bits() {
+    // >   rbsp_stop_one_bit // equal to 1
+    // >   while( !byte_aligned() )
+    // >     rbsp_alignment_zero_bit // equal to 0
+    // > }
+    // where byte_aligned() is a Bool stating whether the position of the
+    // bitstream is in a byte boundary.
+    //
+    // In real-world H.265 streams, however, some encoders append extra zero
+    // bytes (0x00) after rbsp_trailing_bits() as padding. These bytes are not
+    // part of the RBSP syntax, but they increase RemainingBitCount(). We treat
+    // such trailing all-zero bytes as padding and ignore them when deciding
+    // whether there is more RBSP data before rbsp_trailing_bits().
+    //
+    // To implement this, we:
+    //  - peek all remaining bits (up to a small upper bound),
+    //  - strip any full 0x00 bytes at the very end,
+    //  - then test the remaining pattern against rbsp_trailing_bits().
 
-  // Here we do the following simplification:
-  // (1) We know that rbsp_trailing_bits() is limited to at most 1 byte. Its
-  // definition is:
-  // > rbsp_trailing_bits() {
-  // >   rbsp_stop_one_bit // equal to 1
-  // >   while( !byte_aligned() )
-  // >     rbsp_alignment_zero_bit // equal to 0
-  // >   }
-  // where byte_aligned() is a Bool stating whether the position of the
-  // bitstream is in a byte boundary. So, if there is more than 1 byte
-  // left (8 bits left), clearly "there is more data in the RBSP before the
-  // rbsp_trailing_bits()"
-  if (remaining_bitcount > 8) {
-    return true;
-  }
+    // If there are a lot of bits left, we know for sure there is more RBSP
+    // data before trailing bits (rbsp_trailing_bits is at most 8 bits).
+    // We also avoid peeking more than 32 bits at once.
+    if (remaining_bitcount > 32) {
+        return true;
+    }
 
-  // (2) if we are indeed in the last byte, we just need to know whether the
-  // rest of the byte is [1, 0, ..., 0]. For that, we want to peek in the
-  // bit buffer (not read).
-  // So we first read (peek) the remaining bits.
-  uint32_t remaining_bits;
-  if (!bit_buffer->PeekBits(remaining_bitcount, remaining_bits)) {
-    // this should not happen: we do not have remaining_bits bits left.
-    return false;
-  }
-  // and then check for the actual values to be 100..000
-  bool is_rbsp_trailing_bits =
-      (remaining_bits == (unsigned int)(1 << (remaining_bitcount - 1)));
+    // (2) If we are within a small number of bits, we just need to know
+    // whether the rest of the bits (after stripping padded 0x00 bytes) are
+    // [1, 0, ..., 0]. For that, we want to peek in the bit buffer (not read).
+    // So we first read (peek) the remaining bits.
+    uint32_t remaining_bits = 0;
+    if (!bit_buffer->PeekBits(static_cast<uint32_t>(remaining_bitcount),
+        remaining_bits)) {
+        // this should not happen: we do not have remaining_bits bits left.
+        return false;
+    }
 
-  // if the actual values to be 100..000, we are already at the
-  // rbsp_trailing_bits, which means there is no more RBSP data
-  return !is_rbsp_trailing_bits;
+    // Strip any full zero bytes at the very end (non-standard padding).
+    // Since BitBuffer shifts bits in MSB-first order, the least significant
+    // 8 bits correspond to the last byte in the RBSP range we just peeked.
+    while (remaining_bitcount > 8 && (remaining_bits & 0xFFu) == 0u) {
+        remaining_bits >>= 8;
+        remaining_bitcount -= 8;
+    }
+
+    // and then check for the actual values to be 100..000
+    bool is_rbsp_trailing_bits =
+        (remaining_bits == (1u << (remaining_bitcount - 1)));
+
+    // if the actual values are 100..000, we are already at the
+    // rbsp_trailing_bits (plus any stripped 0x00 padding), which means there
+    // is no more RBSP data; otherwise there is more RBSP data.
+    return !is_rbsp_trailing_bits;
 }
 
 bool rbsp_trailing_bits(BitBuffer *bit_buffer) {
