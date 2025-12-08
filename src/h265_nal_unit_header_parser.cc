@@ -32,11 +32,19 @@ bool H265NalUnitHeaderParser::GetNalUnitType(const uint8_t* data,
                                              const size_t length,
                                              NalUnitType& naluType) noexcept {
   BitBuffer bitBuffer(data, length);
-  auto naluHeader = ParseNalUnitHeader(&bitBuffer);
-  if (!naluHeader) {
-    return false;
+
+  uint32_t result{};
+  // forbidden_zero_bit  f(1)
+  if (!bitBuffer.ReadBits(1, result)) {
+      return false;
   }
-  naluType = static_cast<NalUnitType>(naluHeader->nal_unit_type);
+
+  // nal_unit_type  u(6)
+  if (!bitBuffer.ReadBits(6, result)) {
+      return false;
+  }
+
+  naluType = static_cast<NalUnitType>(result);
   return true;
 }
 
